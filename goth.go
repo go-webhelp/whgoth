@@ -6,6 +6,7 @@ package whgoth
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"log"
 	"net/http"
 	"net/url"
 
@@ -31,8 +32,9 @@ type AuthProvider struct {
 func newAuthProvider(p goth.Provider, baseURL, sessionNamespace string) (
 	a *AuthProvider) {
 	a = &AuthProvider{
-		Provider: p,
-		baseURL:  baseURL,
+		Provider:         p,
+		baseURL:          baseURL,
+		sessionNamespace: sessionNamespace,
 	}
 	a.Dir = whmux.Dir{
 		"login":    whmux.Exact(http.HandlerFunc(a.login)),
@@ -101,6 +103,11 @@ func (a *AuthProvider) callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if loggedIn, _ := session.Values["logged_in"].(bool); loggedIn {
+		wherr.Handle(w, r, wherr.BadRequest.New("already logged in"))
+		return
+	}
+
 	auth, ok := session.Values["auth"].(string)
 	if !ok {
 		wherr.Handle(w, r, wherr.InternalServerError.New(
@@ -151,15 +158,18 @@ func (a *AuthProvider) User(ctx context.Context) (*goth.User, error) {
 
 	sess, err := a.Provider.UnmarshalSession(auth)
 	if err != nil {
+		log.Printf("failed to unmarshal session: %v", err)
 		return nil, nil
 	}
 
 	u, err := a.Provider.FetchUser(sess)
 	if err != nil {
+		log.Printf("failed to fetch user: %v", err)
 		return nil, nil
 	}
 
 	if u.UserID == "" || u.Provider == "" {
+		log.Printf("user had no user id or provider set")
 		return nil, nil
 	}
 	return &u, nil
