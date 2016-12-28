@@ -16,6 +16,7 @@ import (
 	"github.com/jtolds/webhelp/whroute"
 	"github.com/jtolds/webhelp/whsess"
 	"github.com/markbates/goth"
+	"github.com/spacemonkeygo/errors"
 	"golang.org/x/net/context"
 )
 
@@ -42,6 +43,13 @@ func newAuthProvider(p goth.Provider, baseURL, sessionNamespace string) (
 
 func (a *AuthProvider) login(w http.ResponseWriter, r *http.Request) {
 	ctx := whcompat.Context(r)
+
+	u, err := a.User(ctx)
+	if err == nil && u != nil {
+		whredir.Redirect(w, r, safeRedirect(r.FormValue("redirect_to"), "/"))
+		return
+	}
+
 	state := newState()
 	sess, err := a.Provider.BeginAuth(state)
 	if err != nil {
@@ -60,8 +68,12 @@ func (a *AuthProvider) login(w http.ResponseWriter, r *http.Request) {
 		wherr.Handle(w, r, err)
 		return
 	}
-
+	for key := range session.Values {
+		delete(session.Values, key)
+	}
 	session.Values["state"] = state
+	session.Values["logged_in"] = false
+	session.Values["redirect_to"] = safeRedirect(r.FormValue("redirect_to"), "/")
 	session.Values["auth"] = sess.Marshal()
 	err = session.Save(w)
 	if err != nil {
@@ -72,8 +84,85 @@ func (a *AuthProvider) login(w http.ResponseWriter, r *http.Request) {
 	whredir.Redirect(w, r, url)
 }
 
+func (a *AuthProvider) Logout(ctx context.Context, w http.ResponseWriter) (
+	err error) {
+	session, err := whsess.Load(ctx, a.sessionNamespace)
+	if err != nil {
+		return err
+	}
+	return session.Clear(w)
+}
+
 func (a *AuthProvider) callback(w http.ResponseWriter, r *http.Request) {
-	panic("TODO")
+	ctx := whcompat.Context(r)
+	session, err := whsess.Load(ctx, a.sessionNamespace)
+	if err != nil {
+		wherr.Handle(w, r, err)
+		return
+	}
+
+	auth, ok := session.Values["auth"].(string)
+	if !ok {
+		wherr.Handle(w, r, wherr.InternalServerError.New(
+			"no existing session found"))
+		return
+	}
+
+	sess, err := a.Provider.UnmarshalSession(auth)
+	if err != nil {
+		wherr.Handle(w, r, err)
+		return
+	}
+
+	authToken, err := sess.Authorize(a.Provider, r.URL.Query())
+	if err != nil {
+		wherr.Handle(w, r, err)
+		return
+	}
+
+	redirectTo, _ := session.Values["redirect_to"].(string)
+	session.Values["auth_token"] = authToken
+	session.Values["logged_in"] = true
+	session.Values["redirect_to"] = nil
+	session.Values["auth"] = sess.Marshal()
+	err = session.Save(w)
+	if err != nil {
+		wherr.Handle(w, r, err)
+		return
+	}
+
+	whredir.Redirect(w, r, safeRedirect(redirectTo, "/"))
+}
+
+func (a *AuthProvider) User(ctx context.Context) (*goth.User, error) {
+	session, err := whsess.Load(ctx, a.sessionNamespace)
+	if err != nil {
+		return nil, err
+	}
+
+	if loggedIn, _ := session.Values["logged_in"].(bool); !loggedIn {
+		return nil, nil
+	}
+
+	auth, ok := session.Values["auth"].(string)
+	if !ok {
+		return nil, nil
+	}
+
+	sess, err := a.Provider.UnmarshalSession(auth)
+	if err != nil {
+		return nil, nil
+	}
+
+	u, err := a.Provider.FetchUser(sess)
+	if err != nil {
+		return nil, nil
+	}
+
+	if u.UserID == "" || u.Provider == "" {
+		return nil, nil
+	}
+	return &u, nil
 }
 
 func (a *AuthProvider) LoginURL(redirectTo string) string {
@@ -110,8 +199,33 @@ func NewAuthProviders(baseURL, sessionNamespace string,
 	return a
 }
 
+func (a *AuthProviders) Logout(ctx context.Context, w http.ResponseWriter) (
+	err error) {
+	var errs errors.ErrorGroup
+	for _, provider := range a.providers {
+		errs.Add(provider.Logout(ctx, w))
+	}
+	return errs.Finalize()
+}
+
 func (a *AuthProviders) logout(w http.ResponseWriter, r *http.Request) {
-	panic("TODO")
+	err := a.Logout(whcompat.Context(r), w)
+	if err != nil {
+		wherr.Handle(w, r, err)
+		return
+	}
+	whredir.Redirect(w, r, safeRedirect(r.FormValue("redirect_to"), "/"))
+}
+
+func safeRedirect(redirectTo, def string) string {
+	u, err := url.Parse(redirectTo)
+	if err != nil {
+		return def
+	}
+	if u.Path == "" {
+		return def
+	}
+	return u.Path
 }
 
 func (a *AuthProviders) Providers() []*AuthProvider {
@@ -119,7 +233,12 @@ func (a *AuthProviders) Providers() []*AuthProvider {
 }
 
 func (a *AuthProviders) User(ctx context.Context) (*goth.User, error) {
-	// TODO: make sure user.UserId and user.Provider are set and unique
+	for _, provider := range a.providers {
+		u, err := provider.User(ctx)
+		if err != nil || u != nil {
+			return u, err
+		}
+	}
 	return nil, nil
 }
 
