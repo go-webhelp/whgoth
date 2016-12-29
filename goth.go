@@ -1,7 +1,7 @@
 // Copyright (C) 2016 JT Olds
 // See LICENSE for copying information
 
-package whgoth
+package whgoth // import "gopkg.in/go-webhelp/whgoth.v1"
 
 import (
 	"crypto/rand"
@@ -10,15 +10,15 @@ import (
 	"net/http"
 	"net/url"
 
+	"github.com/markbates/goth"
+	"github.com/spacemonkeygo/errors"
+	"golang.org/x/net/context"
 	"gopkg.in/webhelp.v1/whcompat"
 	"gopkg.in/webhelp.v1/wherr"
 	"gopkg.in/webhelp.v1/whmux"
 	"gopkg.in/webhelp.v1/whredir"
 	"gopkg.in/webhelp.v1/whroute"
 	"gopkg.in/webhelp.v1/whsess"
-	"github.com/markbates/goth"
-	"github.com/spacemonkeygo/errors"
-	"golang.org/x/net/context"
 )
 
 type AuthProvider struct {
