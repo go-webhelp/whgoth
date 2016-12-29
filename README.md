@@ -1,4 +1,4 @@
-# webhelp-whgoth
+# whgoth
 
 Webhelp extensions for Mark Bates' Goth library.
 
