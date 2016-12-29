@@ -53,7 +53,7 @@ func (a *AuthProvider) login(w http.ResponseWriter, r *http.Request) {
 	}
 
 	state := newState()
-	sess, err := a.Provider.BeginAuth(state)
+	sess, err := a.Provider.BeginAuth(ctx, state)
 	if err != nil {
 		wherr.Handle(w, r, err)
 		return
@@ -121,7 +121,7 @@ func (a *AuthProvider) callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	authToken, err := sess.Authorize(a.Provider, r.URL.Query())
+	authToken, err := sess.Authorize(ctx, a.Provider, r.URL.Query())
 	if err != nil {
 		wherr.Handle(w, r, err)
 		return
@@ -162,7 +162,7 @@ func (a *AuthProvider) User(ctx context.Context) (*goth.User, error) {
 		return nil, nil
 	}
 
-	u, err := a.Provider.FetchUser(sess)
+	u, err := a.Provider.FetchUser(ctx, sess)
 	if err != nil {
 		log.Printf("failed to fetch user: %v", err)
 		return nil, nil
