@@ -13,12 +13,17 @@ import (
 	"github.com/markbates/goth"
 	"github.com/spacemonkeygo/errors"
 	"golang.org/x/net/context"
+	"gopkg.in/webhelp.v1"
 	"gopkg.in/webhelp.v1/whcompat"
 	"gopkg.in/webhelp.v1/wherr"
 	"gopkg.in/webhelp.v1/whmux"
 	"gopkg.in/webhelp.v1/whredir"
 	"gopkg.in/webhelp.v1/whroute"
 	"gopkg.in/webhelp.v1/whsess"
+)
+
+var (
+	userKey = webhelp.GenSym()
 )
 
 type AuthProvider struct {
@@ -243,6 +248,9 @@ func (a *AuthProviders) Providers() []*AuthProvider {
 }
 
 func (a *AuthProviders) User(ctx context.Context) (*goth.User, error) {
+	if u, ok := ctx.Value(userKey).(*goth.User); ok && u != nil {
+		return u, nil
+	}
 	for _, provider := range a.providers {
 		u, err := provider.User(ctx)
 		if err != nil || u != nil {
@@ -256,7 +264,8 @@ func (a *AuthProviders) RequireUser(
 	authorizedHandler, unauthorizedHandler http.Handler) http.Handler {
 	return whroute.HandlerFunc(authorizedHandler,
 		func(w http.ResponseWriter, r *http.Request) {
-			u, err := a.User(whcompat.Context(r))
+			ctx := whcompat.Context(r)
+			u, err := a.User(ctx)
 			if err != nil {
 				wherr.Handle(w, r, err)
 				return
@@ -264,7 +273,8 @@ func (a *AuthProviders) RequireUser(
 			if u == nil {
 				unauthorizedHandler.ServeHTTP(w, r)
 			} else {
-				authorizedHandler.ServeHTTP(w, r)
+				authorizedHandler.ServeHTTP(w, whcompat.WithContext(r,
+					context.WithValue(ctx, userKey, u)))
 			}
 		})
 }
