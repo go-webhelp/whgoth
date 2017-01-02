@@ -14,6 +14,7 @@ import (
 	"github.com/spacemonkeygo/errors"
 	"golang.org/x/net/context"
 	"gopkg.in/webhelp.v1"
+	"gopkg.in/webhelp.v1/whcache"
 	"gopkg.in/webhelp.v1/whcompat"
 	"gopkg.in/webhelp.v1/wherr"
 	"gopkg.in/webhelp.v1/whmux"
@@ -248,12 +249,13 @@ func (a *AuthProviders) Providers() []*AuthProvider {
 }
 
 func (a *AuthProviders) User(ctx context.Context) (*goth.User, error) {
-	if u, ok := ctx.Value(userKey).(*goth.User); ok && u != nil {
+	if u, ok := whcache.Get(ctx, userKey).(*goth.User); ok && u != nil {
 		return u, nil
 	}
 	for _, provider := range a.providers {
 		u, err := provider.User(ctx)
 		if err != nil || u != nil {
+			whcache.Set(ctx, userKey, u)
 			return u, err
 		}
 	}
@@ -273,8 +275,7 @@ func (a *AuthProviders) RequireUser(
 			if u == nil {
 				unauthorizedHandler.ServeHTTP(w, r)
 			} else {
-				authorizedHandler.ServeHTTP(w, whcompat.WithContext(r,
-					context.WithValue(ctx, userKey, u)))
+				authorizedHandler.ServeHTTP(w, r)
 			}
 		})
 }
