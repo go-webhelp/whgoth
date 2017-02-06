@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"sync"
 
 	"github.com/markbates/goth"
 	"github.com/spacemonkeygo/errors"
@@ -24,29 +25,23 @@ import (
 )
 
 var (
-	userKey = webhelp.GenSym()
+	userKey      = webhelp.GenSym()
+	providerName = whmux.NewStringArg()
 )
 
 type AuthProvider struct {
 	goth.Provider
 	baseURL          string
 	sessionNamespace string
-
-	whmux.Dir
 }
 
 func newAuthProvider(p goth.Provider, baseURL, sessionNamespace string) (
 	a *AuthProvider) {
-	a = &AuthProvider{
+	return &AuthProvider{
 		Provider:         p,
 		baseURL:          baseURL,
 		sessionNamespace: sessionNamespace,
 	}
-	a.Dir = whmux.Dir{
-		"login":    whmux.Exact(http.HandlerFunc(a.login)),
-		"callback": whmux.Exact(http.HandlerFunc(a.callback)),
-	}
-	return a
 }
 
 func (a *AuthProvider) login(w http.ResponseWriter, r *http.Request) {
@@ -83,7 +78,7 @@ func (a *AuthProvider) login(w http.ResponseWriter, r *http.Request) {
 	session.Values["logged_in"] = false
 	session.Values["redirect_to"] = safeRedirect(r.FormValue("redirect_to"), "/")
 	session.Values["auth"] = sess.Marshal()
-	err = session.Save(w)
+	err = session.Save(ctx, w)
 	if err != nil {
 		wherr.Handle(w, r, err)
 		return
@@ -98,7 +93,7 @@ func (a *AuthProvider) Logout(ctx context.Context, w http.ResponseWriter) (
 	if err != nil {
 		return err
 	}
-	return session.Clear(w)
+	return session.Clear(ctx, w)
 }
 
 func (a *AuthProvider) callback(w http.ResponseWriter, r *http.Request) {
@@ -138,7 +133,7 @@ func (a *AuthProvider) callback(w http.ResponseWriter, r *http.Request) {
 	session.Values["logged_in"] = true
 	session.Values["redirect_to"] = nil
 	session.Values["auth"] = sess.Marshal()
-	err = session.Save(w)
+	err = session.Save(ctx, w)
 	if err != nil {
 		wherr.Handle(w, r, err)
 		return
@@ -187,36 +182,112 @@ func (a *AuthProvider) LoginURL(redirectTo string) string {
 }
 
 type AuthProviders struct {
-	baseURL   string
-	providers []*AuthProvider
-
+	baseURL, sessionNamespace string
+	providersCallback         func(context.Context) ([]goth.Provider, error)
 	whmux.Dir
+
+	providersMtx    sync.Mutex
+	providersSetup  bool
+	providers       []*AuthProvider
+	providersByName map[string]*AuthProvider
 }
 
 func NewAuthProviders(baseURL, sessionNamespace string,
 	providers ...goth.Provider) (a *AuthProviders) {
-	p := make([]*AuthProvider, 0, len(providers))
-	pMux := make(whmux.Dir, len(providers))
-	for _, provider := range providers {
-		w := newAuthProvider(provider,
-			baseURL+"/provider/"+provider.Name(),
-			sessionNamespace+"."+provider.Name())
-		p = append(p, w)
-		pMux[provider.Name()] = w
-	}
+	return NewLazyAuthProviders(baseURL, sessionNamespace,
+		func(context.Context) ([]goth.Provider, error) {
+			return providers, nil
+		})
+}
+
+func NewLazyAuthProviders(baseURL, sessionNamespace string,
+	providers func(context.Context) ([]goth.Provider, error)) (
+	a *AuthProviders) {
+
 	a = &AuthProviders{
-		baseURL:   baseURL,
-		providers: p,
+		baseURL:           baseURL,
+		sessionNamespace:  sessionNamespace,
+		providersCallback: providers,
 	}
 	a.Dir = whmux.Dir{
-		"logout":   whmux.Exact(http.HandlerFunc(a.logout)),
-		"provider": pMux,
+		"logout": whmux.Exact(http.HandlerFunc(a.logout)),
+		"provider": providerName.Shift(whmux.Dir{
+			"login":    whmux.Exact(http.HandlerFunc(a.login)),
+			"callback": whmux.Exact(http.HandlerFunc(a.callback)),
+		}),
 	}
 	return a
 }
 
+func (a *AuthProviders) setupProviders(ctx context.Context) error {
+	a.providersMtx.Lock()
+	defer a.providersMtx.Unlock()
+	if a.providersSetup {
+		return nil
+	}
+
+	providers, err := a.providersCallback(ctx)
+	if err != nil {
+		return err
+	}
+
+	p := make([]*AuthProvider, 0, len(providers))
+	providersByName := make(map[string]*AuthProvider, len(providers))
+	for _, provider := range providers {
+		w := newAuthProvider(provider,
+			a.baseURL+"/provider/"+provider.Name(),
+			a.sessionNamespace+"."+provider.Name())
+		p = append(p, w)
+		if provider.Name() != "" {
+			providersByName[provider.Name()] = w
+		}
+	}
+	a.providers = p
+	a.providersByName = providersByName
+	a.providersSetup = true
+
+	return nil
+}
+
+func (a *AuthProviders) login(w http.ResponseWriter, r *http.Request) {
+	ctx := whcompat.Context(r)
+	err := a.setupProviders(ctx)
+	if err != nil {
+		wherr.Handle(w, r, err)
+		return
+	}
+
+	name := providerName.Get(ctx)
+	if p, ok := a.providersByName[name]; ok {
+		p.login(w, r)
+	} else {
+		wherr.Handle(w, r, wherr.NotFound.New("provider %s not found", name))
+	}
+}
+
+func (a *AuthProviders) callback(w http.ResponseWriter, r *http.Request) {
+	ctx := whcompat.Context(r)
+	err := a.setupProviders(ctx)
+	if err != nil {
+		wherr.Handle(w, r, err)
+		return
+	}
+
+	name := providerName.Get(ctx)
+	if p, ok := a.providersByName[name]; ok {
+		p.callback(w, r)
+	} else {
+		wherr.Handle(w, r, wherr.NotFound.New("provider %s not found", name))
+	}
+}
+
 func (a *AuthProviders) Logout(ctx context.Context, w http.ResponseWriter) (
 	err error) {
+	err = a.setupProviders(ctx)
+	if err != nil {
+		return err
+	}
+
 	var errs errors.ErrorGroup
 	for _, provider := range a.providers {
 		errs.Add(provider.Logout(ctx, w))
@@ -244,14 +315,25 @@ func safeRedirect(redirectTo, def string) string {
 	return u.Path
 }
 
-func (a *AuthProviders) Providers() []*AuthProvider {
-	return a.providers
+func (a *AuthProviders) Providers(ctx context.Context) (
+	[]*AuthProvider, error) {
+	err := a.setupProviders(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	return a.providers, nil
 }
 
 func (a *AuthProviders) User(ctx context.Context) (*goth.User, error) {
 	if u, ok := whcache.Get(ctx, userKey).(*goth.User); ok && u != nil {
 		return u, nil
 	}
+	err := a.setupProviders(ctx)
+	if err != nil {
+		return nil, err
+	}
+
 	for _, provider := range a.providers {
 		u, err := provider.User(ctx)
 		if err != nil || u != nil {
