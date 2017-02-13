@@ -309,10 +309,13 @@ func safeRedirect(redirectTo, def string) string {
 	if err != nil {
 		return def
 	}
-	if u.Path == "" {
-		return def
+	if u.RawQuery == "" {
+		if u.Path == "" {
+			return def
+		}
+		return u.Path
 	}
-	return u.Path
+	return u.Path + "?" + u.RawQuery
 }
 
 func (a *AuthProviders) Providers(ctx context.Context) (
