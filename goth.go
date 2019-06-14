@@ -11,7 +11,7 @@ import (
 	"net/url"
 	"sync"
 
-	"github.com/markbates/goth"
+	"github.com/jtolds/goth"
 	"github.com/spacemonkeygo/errors"
 	"golang.org/x/net/context"
 	"gopkg.in/webhelp.v1"
